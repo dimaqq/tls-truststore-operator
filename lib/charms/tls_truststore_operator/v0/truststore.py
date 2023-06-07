@@ -4,7 +4,7 @@ import json
 from typing import Dict, List
 
 import pydantic as pydantic
-from ops import Unit, Model, Relation
+from ops import Unit, Model, Relation, CharmBase
 from pydantic import Json
 
 # The unique Charmhub library identifier, never change it
@@ -24,19 +24,31 @@ class TrustStoreRequirerUnitDatabagSchema(pydantic.BaseModel):
 
 class Trust(pydantic.BaseModel):
     certificate: str
+    certificate_signing_request: str
+    ca: str
+    chain: List[str]
 
 
 class TrustStoreProviderAppDatabagSchema(pydantic.BaseModel):
-    certificate: str
-    # a mapping from unit names to Trust objects
+    # a mapping from unit names to Trust objects; e.g.
+    # {
+    #     'traefik/0': {
+    #         'certificate': str,
+    #         'certificate_signing_request': str,
+    #         'ca': str,
+    #         'chain': List[str],
+    #     },
+    # }
     trust: Json[Dict[str, Trust]]
 
 
 class TrustStoreProvider:
-    def __init__(self, unit: Unit, relation_name: str, model: Model):
-        self._unit = unit
+    def __init__(self, charm: CharmBase,
+                 relation_name: str = 'tls_truststore'):
+        self._unit = unit = charm.unit
         self._relation_name = relation_name
-        self._model = model
+        self._model = charm.model
+
         if not unit.is_leader():
             raise RuntimeError('only leaders should use this object')
 
@@ -47,6 +59,7 @@ class TrustStoreProvider:
     def relations(self) -> List[Relation]:
         return self._model.relations[self._relation_name]
 
+    @property
     def csrs(self):
         csrs = []
         app = self._unit.app
@@ -63,27 +76,32 @@ class TrustStoreProvider:
         app = self._unit.app
 
         for relation in self.relations:
-            app_databag = relation.data[app]
+
+            data = {}
             for u in relation.units:
                 if u.app is app:
                     continue
 
                 csr_for_unit = relation.data[u]['certificate_signing_request']
 
+                # FIXME: this has horrible O, could optimize
                 # find what certificate corresponds to the unit that requested it
                 cert = next(filter(
                     lambda cert: cert['certificate_signing_request'] == csr_for_unit,
                     certificates
                 ))
 
-                app_databag[u.name] = json.dumps(cert)
+                data[u.name] = cert
+
+            # dump to app databag.
+            relation.data[app]['trust'] = json.dumps(data)
 
 
 class TrustStoreRequirer:
-    def __init__(self, unit: Unit, relation_name: str, model: Model):
-        self._unit = unit
+    def __init__(self, charm: CharmBase, relation_name: str):
+        self._unit = charm.unit
         self._relation_name = relation_name
-        self._model = model
+        self._model = charm.model
 
     def is_ready(self) -> bool:
         return len(self._model.relations[self._relation_name]) == 1

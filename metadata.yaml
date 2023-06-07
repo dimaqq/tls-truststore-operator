@@ -7,3 +7,10 @@ description: |
 summary: |
   TEMPLATE-TODO: fill out the charm's summary
 
+requires:
+  tls-certificates:
+    interface: tls_certificates
+
+provides:
+  tls-truststore:
+    interface: tls_truststore

@@ -11,94 +11,62 @@ develop a new k8s charm using the Operator Framework:
 
     https://discourse.charmhub.io/t/4208
 """
-
 import logging
 
 from ops.charm import CharmBase
-from ops.framework import StoredState
 from ops.main import main
-from ops.model import ActiveStatus
+from ops.model import ActiveStatus, WaitingStatus
+
+from charms.tls_certificates_interface.v2.tls_certificates import (
+    TLSCertificatesRequiresV2,
+)
+from charms.tls_truststore_operator.v0.truststore import TrustStoreProvider
 
 logger = logging.getLogger(__name__)
 
 
-class OperatorTemplateCharm(CharmBase):
-    """Charm the service."""
-
-    _stored = StoredState()
-
+class TLSTrustStoreCharm(CharmBase):
     def __init__(self, *args):
         super().__init__(*args)
-        self.framework.observe(self.on.httpbin_pebble_ready, self._on_httpbin_pebble_ready)
-        self.framework.observe(self.on.config_changed, self._on_config_changed)
-        self.framework.observe(self.on.fortune_action, self._on_fortune_action)
-        self._stored.set_default(things=[])
+        self.truststore_provider = TrustStoreProvider(self)
 
-    def _on_httpbin_pebble_ready(self, event):
-        """Define and start a workload using the Pebble API.
+        self.certificates = TLSCertificatesRequiresV2(self, "tls_certificates")
+        self.framework.observe(self.on.install, self._on_install)
 
-        TEMPLATE-TODO: change this example to suit your needs.
-        You'll need to specify the right entrypoint and environment
-        configuration for your specific workload. Tip: you can see the
-        standard entrypoint of an existing container using docker inspect
+        self.framework.observe(
+            self.on.tls_certificates_relation_changed,
+            self._on_tls_certificates_relation_changed
+        )
+        self.framework.observe(
+            self.on.tls_truststore_relation_changed,
+            self._on_tls_truststore_relation_changed
+        )
 
-        Learn more about Pebble layers at https://github.com/canonical/pebble
-        """
-        # Get a reference the container attribute on the PebbleReadyEvent
-        container = event.workload
-        # Define an initial Pebble layer configuration
-        pebble_layer = {
-            "summary": "httpbin layer",
-            "description": "pebble config layer for httpbin",
-            "services": {
-                "httpbin": {
-                    "override": "replace",
-                    "summary": "httpbin",
-                    "command": "gunicorn -b 0.0.0.0:80 httpbin:app -k gevent",
-                    "startup": "enabled",
-                    "environment": {"thing": self.model.config["thing"]},
-                }
-            },
-        }
-        # Add initial Pebble config layer using the Pebble API
-        container.add_layer("httpbin", pebble_layer, combine=True)
-        # Autostart any services that were defined with startup: enabled
-        container.autostart()
-        # Learn more about statuses in the SDK docs:
-        # https://juju.is/docs/sdk/constructs#heading--statuses
-        self.unit.status = ActiveStatus()
+    def _on_install(self, _):
+        self.unit.status = WaitingStatus('waiting for relations...')
 
-    def _on_config_changed(self, _):
-        """Just an example to show how to deal with changed configuration.
+    def is_ready(self):
+        return self.truststore_provider.is_ready()
 
-        TEMPLATE-TODO: change this example to suit your needs.
-        If you don't need to handle config, you can remove this method,
-        the hook created in __init__.py for it, the corresponding test,
-        and the config.py file.
+    def _on_tls_truststore_relation_changed(self, _event) -> None:
+        # forward csrs to the certificates relation
+        if not self.is_ready():
+            self.unit.status = WaitingStatus('not ready.')
+            return
 
-        Learn more about config at https://juju.is/docs/sdk/config
-        """
-        current = self.config["thing"]
-        if current not in self._stored.things:
-            logger.debug("found a new thing: %r", current)
-            self._stored.things.append(current)
+        for csr in self.truststore_provider.csrs:
+            self.certificates.request_certificate_creation(csr)
 
-    def _on_fortune_action(self, event):
-        """Just an example to show how to receive actions.
+    def _on_certificates_relation_changed(self, _event) -> None:
+        """Publish all certificates over to the tls-truststore side."""
+        if not self.is_ready():
+            self.unit.status = WaitingStatus('not ready.')
+            return
 
-        TEMPLATE-TODO: change this example to suit your needs.
-        If you don't need to handle actions, you can remove this method,
-        the hook created in __init__.py for it, the corresponding test,
-        and the actions.py file.
+        certificates = _event.relation.data[_event.relation.app]['certificates']
+        self.truststore_provider.publish_certificates(certificates)
 
-        Learn more about actions at https://juju.is/docs/sdk/actions
-        """
-        fail = event.params["fail"]
-        if fail:
-            event.fail(fail)
-        else:
-            event.set_results({"fortune": "A bug in the code is worth two in the documentation."})
 
 
 if __name__ == "__main__":
-    main(OperatorTemplateCharm)
+    main(TLSTrustStoreCharm)
