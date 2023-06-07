@@ -10,6 +10,7 @@ summary: |
 requires:
   tls-certificates:
     interface: tls_certificates
+    limit: 1
 
 provides:
   tls-truststore:
