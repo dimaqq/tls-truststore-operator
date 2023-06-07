@@ -95,5 +95,5 @@ class TrustStoreRequirer:
             raise RuntimeError(f'too many or too few relations on {self._relation_name}')
         return rels[0]
 
-    def request_certificate(self, csr: str):
+    def submit_csr(self, csr):
         self.relation.data[self._unit]['certificate_signing_request'] = csr
