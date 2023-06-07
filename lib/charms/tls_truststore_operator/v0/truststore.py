@@ -19,7 +19,11 @@ LIBPATCH = 1
 
 
 class TrustStoreRequirerUnitDatabagSchema(pydantic.BaseModel):
-    csr: str
+    certificate_signing_request: str
+
+class TrustStoreRequirerSchema(pydantic.BaseModel):
+    unit: TrustStoreRequirerUnitDatabagSchema
+    app: None
 
 
 class Trust(pydantic.BaseModel):
@@ -41,10 +45,14 @@ class TrustStoreProviderAppDatabagSchema(pydantic.BaseModel):
     # }
     trust: Json[Dict[str, Trust]]
 
+class TrustStoreProviderSchema(pydantic.BaseModel):
+    unit: None
+    app: TrustStoreProviderAppDatabagSchema
+
 
 class TrustStoreProvider:
     def __init__(self, charm: CharmBase,
-                 relation_name: str = 'tls_truststore'):
+                 relation_name: str = 'tls-truststore'):
         self._unit = unit = charm.unit
         self._relation_name = relation_name
         self._model = charm.model
@@ -84,12 +92,17 @@ class TrustStoreProvider:
 
                 csr_for_unit = relation.data[u]['certificate_signing_request']
 
-                # FIXME: this has horrible O, could optimize
-                # find what certificate corresponds to the unit that requested it
-                cert = next(filter(
-                    lambda cert: cert['certificate_signing_request'] == csr_for_unit,
-                    certificates
-                ))
+                try:
+                    # FIXME: this has horrible O, could optimize
+                    # find what certificate corresponds to the unit that requested it
+                    cert = next(filter(
+                        lambda cert: cert['certificate_signing_request'] == csr_for_unit,
+                        certificates
+                    ))
+                except StopIteration:
+                    if u.name in data:
+                        del data[u.name]
+                    continue
 
                 data[u.name] = cert
 

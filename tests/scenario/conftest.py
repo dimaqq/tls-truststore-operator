@@ -1,7 +1,6 @@
 import pytest as pytest
-from scenario import Context
-
 from charm import TLSTrustStoreCharm
+from scenario import Context
 
 
 @pytest.fixture
