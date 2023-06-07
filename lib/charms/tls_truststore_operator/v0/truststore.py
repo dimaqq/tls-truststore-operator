@@ -4,7 +4,7 @@ import json
 from typing import Dict, List
 
 import pydantic as pydantic
-from ops import Unit, Model, Relation, CharmBase
+from ops import Relation, CharmBase
 from pydantic import Json
 
 # The unique Charmhub library identifier, never change it
@@ -20,6 +20,7 @@ LIBPATCH = 1
 
 class TrustStoreRequirerUnitDatabagSchema(pydantic.BaseModel):
     certificate_signing_request: str
+
 
 class TrustStoreRequirerSchema(pydantic.BaseModel):
     unit: TrustStoreRequirerUnitDatabagSchema
@@ -45,6 +46,7 @@ class TrustStoreProviderAppDatabagSchema(pydantic.BaseModel):
     # }
     trust: Json[Dict[str, Trust]]
 
+
 class TrustStoreProviderSchema(pydantic.BaseModel):
     unit: None
     app: TrustStoreProviderAppDatabagSchema
@@ -53,14 +55,13 @@ class TrustStoreProviderSchema(pydantic.BaseModel):
 class TrustStoreProvider:
     def __init__(self, charm: CharmBase,
                  relation_name: str = 'tls-truststore'):
-        self._unit = unit = charm.unit
+        self._unit = charm.unit
         self._relation_name = relation_name
         self._model = charm.model
 
-        if not unit.is_leader():
-            raise RuntimeError('only leaders should use this object')
-
     def is_ready(self) -> bool:
+        if not self._unit.is_leader():
+            return False
         return len(self._model.relations[self._relation_name]) > 0
 
     @property
@@ -81,6 +82,9 @@ class TrustStoreProvider:
 
     def publish_certificates(self, certificates):
         """Publishes the certificates for all remotes to see."""
+        if not self._unit.is_leader():
+            raise RuntimeError('only leaders can do this')
+
         app = self._unit.app
 
         for relation in self.relations:
