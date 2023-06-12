@@ -1,18 +1,16 @@
 from typing import Callable, Optional, Union
 
-from ops.charm import CharmBase
-from ops.framework import EventBase, Framework, Object
-from ops.model import (
-    ActiveStatus,
-    WaitingStatus
-)
-
 from charms.tls_certificates_interface.v2.tls_certificates import (
     AllCertificatesInvalidatedEvent,
     CertificateAvailableEvent,
     CertificateExpiringEvent,
     CertificateInvalidatedEvent,
+    TLSCertificatesRequiresV2,
 )
+from ops.charm import CharmBase, RelationJoinedEvent
+from ops.framework import EventBase, Object
+from ops.model import ActiveStatus, Relation, WaitingStatus
+
 
 class ObservabilityTruststore(Object):
     def __init__(
@@ -23,8 +21,7 @@ class ObservabilityTruststore(Object):
         generate_csr: Callable,
         cert_subject: Optional[str] = None,
         peer_relation_name: str = "replicas",
-        truststore_relation_name: str = "tls-truststore",
-        key: str = "observability-truststore",
+        key: str = "whatgoeshere" # TODO what to put here?
         ):
         super().__init__(charm, key)
 
@@ -34,18 +31,36 @@ class ObservabilityTruststore(Object):
         self.generate_csr = generate_csr
         self.cert_subject = charm.unit.name if not cert_subject else cert_subject
         self.peer_relation_name = peer_relation_name
-        self.truststore_relation_name = truststore_relation_name
 
-        self.framework.observe(charm.on.install, self._on_install)
-        self.framework.observe(charm.on[truststore_relation_name].relation_joined, self._on_truststore_relation_joined)
-        self.framework.observe(charm.on[truststore_relation_name].certificate_available, self._on_certificate_available)
-        self.framework.observe(charm.on[truststore_relation_name].certificate_expiring, self._on_certificate_expiring)
+        self.certificates = TLSCertificatesRequiresV2(self.charm, self.cert_subject)
+
+        self.framework.observe(self.charm.on.install, self._on_install)
+        self.framework.observe(
+            self.charm.on.certificates_relation_joined,  # pyright: ignore
+            self._on_certificates_relation_joined
+        )
+        self.framework.observe(
+            self.certificates.on.certificate_available,  # pyright: ignore
+            self._on_certificate_available
+        )
+        self.framework.observe(
+            self.certificates.on.certificate_expiring,  # pyright: ignore
+            self._on_certificate_expiring
+        )
+        self.framework.observe(
+            self.certificates.on.certificate_invalidated,  # pyright: ignore
+            self._on_certificate_invalidated
+        )
+        self.framework.observe(
+            self.certificates.on.all_certificates_invalidated,  # pyright: ignore
+            self._on_all_certificates_invalidated
+        )
 
 
 
     def _is_peer_relation_ready(self, event: EventBase) -> Optional[Relation]:
         """Check if the peer relation is ready for keys storage."""
-        replicas_relation = self.charm.model.get_relation("replicas")
+        replicas_relation = self.charm.model.get_relation(self.peer_relation_name)
         if not replicas_relation:
             self.charm.unit.status = WaitingStatus("Waiting for peer relation to be created")
             event.defer()
@@ -63,11 +78,11 @@ class ObservabilityTruststore(Object):
                 }
             )
 
-    def _on_truststore_relation_joined(
+    def _on_certificates_relation_joined(
         self,
         event: RelationJoinedEvent,
         ) -> None:
-        """Generate the CSR and send it over relation data."""
+        """Generate the CSR and request the certificate creation."""
         if replicas_relation := self._is_peer_relation_ready(event):
             private_key_password = replicas_relation.data[self.charm.app].get("private_key_password")
             private_key = replicas_relation.data[self.charm.app].get("private_key")
@@ -79,31 +94,28 @@ class ObservabilityTruststore(Object):
                 subject=self.cert_subject,
             )
             replicas_relation.data[self.charm.app].update({"csr": csr.decode()})
-            truststore_relation = self.charm.model.get_relation(self.truststore_relation_name)
-            if truststore_relation:
-                truststore_relation.data[self.charm.unit].update({"csr": csr.decode()})
- 
+            self.certificates.request_certificate_creation(certificate_signing_request=csr)
+
     def _on_certificate_available(
         self,
         event: CertificateAvailableEvent
     ) -> None:
         """Get the certificate from the event and store it in a peer relation."""
         if replicas_relation := self._is_peer_relation_ready(event):
-            replicas_relation.data[self.charm.app].update({
-                "certificate": event.certificate,
-                "ca": event.ca,
-                "chain": event.chain,
-            })
+            replicas_relation.data[self.charm.app].update({"certificate": event.certificate})
+            replicas_relation.data[self.charm.app].update({"ca": event.ca})
+            replicas_relation.data[self.charm.app].update({"chain": event.chain})  # pyright: ignore
             self.charm.unit.status = ActiveStatus() # TODO correct? will it override a Blocked ?
 
     def _on_certificate_expiring(
         self,
         event: Union[CertificateExpiringEvent, CertificateInvalidatedEvent]
     ) -> None:
+        """Generate a new CSR and request certificate renewal."""
         if replicas_relation := self._is_peer_relation_ready(event):
             old_csr = replicas_relation.data[self.charm.app].get("csr")
             if not old_csr:
-                return # TODO what to do here? there should always be a csr ?
+                return # TODO what to do here? fail? should there always be a csr ?
             private_key_password = replicas_relation.data[self.charm.app].get("private_key_password")
             private_key = replicas_relation.data[self.charm.app].get("private_key")
             if not private_key_password or not private_key:
@@ -113,22 +125,44 @@ class ObservabilityTruststore(Object):
                 private_key_password=private_key_password.encode(),
                 subject=self.cert_subject,
             )
-            # TODO somehow trigger tls_certificates.request_certificate_renewal,
-            #        NOT certificate emission
+            self.certificates.request_certificate_renewal(
+                old_certificate_signing_request=old_csr.encode(),
+                new_certificate_signing_request=new_csr,
+            )
             replicas_relation.data[self.charm.app].update({"csr": new_csr.decode()})
-            truststore_relation = self.charm.model.get_relation(self.truststore_relation_name)
-            if truststore_relation:
-                truststore_relation.data[self.charm.unit].update({"csr": new_csr.decode()})
 
-    # TODO: write the others _on_* handlers
+    def _certificate_revoked(self, event) -> None:
+        """Remove the certificate from the peer relation and generate a new CSR."""
+        if replicas_relation := self._is_peer_relation_ready(event):
+            old_csr = replicas_relation.data[self.charm.app].get("csr")
+            if not old_csr:
+                return # TODO what to do here? fail? should there always be a csr ?
+            private_key_password = replicas_relation.data[self.charm.app].get("private_key_password")
+            private_key = replicas_relation.data[self.charm.app].get("private_key")
+            if not private_key_password or not private_key:
+                return # TODO what to do if None? fail?
+            new_csr = self.generate_csr(
+                private_key=private_key.encode(),
+                private_key_password=private_key_password.encode(),
+                subject=self.cert_subject,
+            )
+            replicas_relation.data[self.charm.app].update({"csr": new_csr.decode()})
+            replicas_relation.data[self.charm.app].pop("certificate")
+            replicas_relation.data[self.charm.app].pop("ca")
+            replicas_relation.data[self.charm.app].pop("chain")
+            self.charm.unit.status = WaitingStatus("Waiting for new certificate")
 
-    def _on_certificate_revoked(self, event) -> None:
-        pass 
-    
+
     def _on_certificate_invalidated(self, event: CertificateInvalidatedEvent) -> None:
-        pass
+        """Deal with certificate revocation and expiration."""
+        if self._is_peer_relation_ready(event):
+            if event.reason == "revoked":
+                self._certificate_revoked(event)
+            if event.reason == "expired":
+                self._on_certificate_expiring(event)
 
     def _on_all_certificates_invalidated(self, event: AllCertificatesInvalidatedEvent) -> None:
+        # Do what you want with this information, probably remove all certificates
         pass
 
 
