@@ -41,8 +41,6 @@ class ObservabilityTruststore(Object):
         self.framework.observe(charm.on[truststore_relation_name].certificate_available, self._on_certificate_available)
         self.framework.observe(charm.on[truststore_relation_name].certificate_expiring, self._on_certificate_expiring)
 
-
-
     def _is_peer_relation_ready(self, event: EventBase) -> Optional[Relation]:
         """Check if the peer relation is ready for keys storage."""
         replicas_relation = self.charm.model.get_relation("replicas")

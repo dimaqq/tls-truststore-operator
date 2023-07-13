@@ -18,8 +18,14 @@ LIBAPI = 0
 LIBPATCH = 1
 
 
+class Trust(pydantic.BaseModel):
+    certificate: str
+    # ca: str
+    # chain: List[str]
+
+
 class TrustStoreRequirerUnitDatabagSchema(pydantic.BaseModel):
-    certificate_signing_request: str
+    trust: Trust
 
 
 class TrustStoreRequirerSchema(pydantic.BaseModel):
@@ -27,21 +33,11 @@ class TrustStoreRequirerSchema(pydantic.BaseModel):
     app: None
 
 
-class Trust(pydantic.BaseModel):
-    certificate: str
-    certificate_signing_request: str
-    ca: str
-    chain: List[str]
-
-
 class TrustStoreProviderAppDatabagSchema(pydantic.BaseModel):
     # a mapping from unit names to Trust objects; e.g.
     # {
     #     'traefik/0': {
     #         'certificate': str,
-    #         'certificate_signing_request': str,
-    #         'ca': str,
-    #         'chain': List[str],
     #     },
     # }
     trust: Json[Dict[str, Trust]]
@@ -68,20 +64,8 @@ class TrustStoreProvider:
     def relations(self) -> List[Relation]:
         return self._model.relations[self._relation_name]
 
-    @property
-    def csrs(self):
-        csrs = []
-        app = self._unit.app
-
-        for relation in self.relations:
-            for u in relation.units:
-                if u.app is app:
-                    continue
-                csrs.append(relation.data[u]['certificate_signing_request'])
-        return csrs
-
-    def publish_certificates(self, certificates):
-        """Publishes the certificates for all remotes to see."""
+    def refresh_store(self):
+        """Publishes all certificates for all remotes to see."""
         if not self._unit.is_leader():
             raise RuntimeError('only leaders can do this')
 
@@ -94,24 +78,13 @@ class TrustStoreProvider:
                 if u.app is app:
                     continue
 
-                csr_for_unit = relation.data[u]['certificate_signing_request']
-
-                try:
-                    # FIXME: this has horrible O, could optimize
-                    # find what certificate corresponds to the unit that requested it
-                    cert = next(filter(
-                        lambda cert: cert['certificate_signing_request'] == csr_for_unit,
-                        certificates
-                    ))
-                except StopIteration:
-                    if u.name in data:
-                        del data[u.name]
-                    continue
-
-                data[u.name] = cert
+                # todo: use .load() from Tempo
+                cert_for_unit = TrustStoreRequirerUnitDatabagSchema.parse_obj(relation.data[u]).trust.certificate
+                data[u.name] = cert_for_unit
 
             # dump to app databag.
-            relation.data[app]['trust'] = json.dumps(data)
+            data = TrustStoreProviderAppDatabagSchema.parse_raw(data)
+            relation.data[app]['trust'] = data.json()
 
 
 class TrustStoreRequirer:
@@ -130,5 +103,6 @@ class TrustStoreRequirer:
             raise RuntimeError(f'too many or too few relations on {self._relation_name}')
         return rels[0]
 
-    def submit_csr(self, csr):
-        self.relation.data[self._unit]['certificate_signing_request'] = csr
+    def submit_cert(self, cert:       str):
+        trust = Trust(certificate=cert)
+        self.relation.data[self._unit]['trust'] = trust.json()

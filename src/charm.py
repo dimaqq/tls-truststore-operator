@@ -14,9 +14,6 @@ develop a new k8s charm using the Operator Framework:
 import json
 import logging
 
-from charms.tls_certificates_interface.v2.tls_certificates import (
-    TLSCertificatesRequiresV2,
-)
 from charms.tls_truststore_operator.v0.truststore import TrustStoreProvider
 from ops.charm import CharmBase
 from ops.main import main
@@ -32,15 +29,13 @@ class TLSTrustStoreCharm(CharmBase):
         super().__init__(*args)
         self.truststore_provider = TrustStoreProvider(self)
 
-        self.certificates = TLSCertificatesRequiresV2(self, "tls-certificates")
         self.framework.observe(self.on.install, self._on_install)
 
-        self.framework.observe(
-            self.on.tls_certificates_relation_changed, self._on_tls_certificates_relation_changed
-        )
-        self.framework.observe(
-            self.on.tls_truststore_relation_changed, self._on_tls_truststore_relation_changed
-        )
+        ts_events = self.on['tls_truststore']
+        for event in [ts_events.relation_changed, ts_events.relation_created, ts_events.relation_joined, ts_events.relation_departed, ts_events.relation_broken]:
+            self.framework.observe(
+                event, self._on_tls_truststore_event
+            )
 
     def _on_install(self, _):
         self.unit.status = WaitingStatus("waiting for relations...")
@@ -49,25 +44,13 @@ class TLSTrustStoreCharm(CharmBase):
         """Readiness check."""
         return self.truststore_provider.is_ready()
 
-    def _on_tls_truststore_relation_changed(self, _event) -> None:
-        # forward csrs to the certificates relation
+    def _on_tls_truststore_event(self, _event) -> None:
+        """Refresh the store so that all related units can see one another's certs."""
         if not self.is_ready():
             self.unit.status = WaitingStatus("not ready.")
             return
 
-        for csr in self.truststore_provider.csrs:
-            self.certificates.request_certificate_creation(csr.encode("utf-8"))
-        self.unit.status = ActiveStatus()
-
-    def _on_tls_certificates_relation_changed(self, _event) -> None:
-        """Publish all certificates over to the tls-truststore side."""
-        if not self.is_ready():
-            self.unit.status = WaitingStatus("not ready.")
-            return
-
-        raw_certificates = _event.relation.data[_event.relation.app]["certificates"]
-        certificates = json.loads(raw_certificates)
-        self.truststore_provider.publish_certificates(certificates)
+        self.truststore_provider.refresh_store()
         self.unit.status = ActiveStatus()
 
 
